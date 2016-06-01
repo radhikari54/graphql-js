@@ -240,10 +240,12 @@ function executeOperation(
     Object.create(null)
   );
 
+  const exePath = [];
+
   if (operation.operation === 'mutation') {
-    return executeFieldsSerially(exeContext, type, rootValue, [], fields);
+    return executeFieldsSerially(exeContext, type, rootValue, exePath, fields);
   }
-  return executeFields(exeContext, type, rootValue, [], fields);
+  return executeFields(exeContext, type, rootValue, exePath, fields);
 }
 
 /**
