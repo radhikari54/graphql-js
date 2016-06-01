@@ -8,7 +8,7 @@
  *  of patent rights can be found in the PATENTS file in the same directory.
  */
 
-import { GraphQLError, locatedError } from '../error';
+import { GraphQLError, PathedError, locatedError } from '../error';
 import find from '../jsutils/find';
 import invariant from '../jsutils/invariant';
 import isNullish from '../jsutils/isNullish';
@@ -87,6 +87,7 @@ type ExecutionContext = {
   contextValue: mixed;
   operation: OperationDefinition;
   variableValues: {[key: string]: mixed};
+  executionPath: [ string | number ];
   errors: Array<GraphQLError>;
 }
 
@@ -209,6 +210,8 @@ function buildExecutionContext(
     rawVariableValues || {}
   );
 
+  const executionPath = [];
+
   return {
     schema,
     fragments,
@@ -216,6 +219,7 @@ function buildExecutionContext(
     contextValue,
     operation,
     variableValues,
+    executionPath,
     errors
   };
 }
@@ -291,9 +295,15 @@ function executeFieldsSerially(
 ): Promise<Object> {
   return Object.keys(fields).reduce(
     (prevPromise, responseName) => prevPromise.then(results => {
+      const childExePath = exeContext.executionPath.slice();
+      childExePath.push(responseName);
+      const childExeContext = Object.assign({}, exeContext, {
+        executionPath: childExePath
+      });
+
       const fieldASTs = fields[responseName];
       const result = resolveField(
-        exeContext,
+        childExeContext,
         parentType,
         sourceValue,
         fieldASTs
@@ -329,8 +339,15 @@ function executeFields(
   const finalResults = Object.keys(fields).reduce(
     (results, responseName) => {
       const fieldASTs = fields[responseName];
+
+      const childExePath = exeContext.executionPath.slice();
+      childExePath.push(responseName);
+      const childExeContext = Object.assign({}, exeContext, {
+        executionPath: childExePath
+      });
+
       const result = resolveField(
-        exeContext,
+        childExeContext,
         parentType,
         sourceValue,
         fieldASTs
@@ -565,19 +582,29 @@ function resolveField(
     rootValue: exeContext.rootValue,
     operation: exeContext.operation,
     variableValues: exeContext.variableValues,
+    executionPath: exeContext.executionPath,
   };
 
   // Get the resolve function, regardless of if its result is normal
   // or abrupt (error).
   const result = resolveOrError(resolveFn, source, args, context, info);
 
-  return completeValueCatchingError(
+  const completed = completeValueCatchingError(
     exeContext,
     returnType,
     fieldASTs,
     info,
     result
   );
+
+  if (isThenable(completed)) {
+    return ((completed: any): Promise).catch(error => {
+      error.executionPath = exeContext.executionPath;
+      return Promise.reject(error);
+    });
+  }
+
+  return completed;
 }
 
 // Isolates the "ReturnOrAbrupt" behavior to not de-opt the `resolveField`
@@ -594,7 +621,12 @@ function resolveOrError(
   } catch (error) {
     // Sometimes a non-error is thrown, wrap it as an Error for a
     // consistent interface.
-    return error instanceof Error ? error : new Error(error);
+    const wrappedError = error instanceof Error ? error : new Error(error);
+    const pathedError = new PathedError(
+      wrappedError.message,
+      wrappedError.stack,
+      info.executionPath);
+    return pathedError;
   }
 }
 
@@ -780,9 +812,20 @@ function completeListValue(
   // where the list contains no Promises by avoiding creating another Promise.
   const itemType = returnType.ofType;
   let containsPromise = false;
-  const completedResults = result.map(item => {
-    const completedItem =
-      completeValueCatchingError(exeContext, itemType, fieldASTs, info, item);
+  const completedResults = result.map((item, index) => {
+    const childExePath = exeContext.executionPath.slice();
+    childExePath.push(index);
+    const childExeContext = Object.assign({}, exeContext, {
+      executionPath: childExePath
+    });
+
+    const childInfo = Object.assign({}, info, {
+      executionPath: childExePath
+    });
+
+    const completedItem = completeValueCatchingError(
+      childExeContext, itemType, fieldASTs, childInfo, item);
+
     if (!containsPromise && isThenable(completedItem)) {
       containsPromise = true;
     }
